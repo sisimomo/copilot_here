@@ -39,6 +39,7 @@ public sealed class RunCommand : ICommand
   // === EXECUTION OPTIONS ===
   private readonly Option<bool> _noCleanupOption;
   private readonly Option<bool> _noPullOption;
+  private readonly Option<bool> _dindOption;
 
   // === HELP OPTIONS ===
   private readonly Option<bool> _help2Option;
@@ -115,6 +116,8 @@ public sealed class RunCommand : ICommand
     _noPullOption = new Option<bool>("--no-pull") { Description = "Skip pulling the latest image" };
     _noPullOption.Aliases.Add("--skip-pull");
 
+    _dindOption = new Option<bool>("--dind") { Description = "Enable Docker-in-Docker (DinD) by mounting the host's Docker socket" };
+
     _help2Option = new Option<bool>("--help2") { Description = "Show GitHub Copilot CLI native help" };
 
     // Update option - handled by shell scripts but shown in help
@@ -170,6 +173,7 @@ public sealed class RunCommand : ICommand
     root.Add(_mountRwOption);
     root.Add(_noCleanupOption);
     root.Add(_noPullOption);
+    root.Add(_dindOption);
     root.Add(_help2Option);
     root.Add(_updateScriptsOption);
     root.Add(_installShellsOption);
@@ -226,6 +230,7 @@ public sealed class RunCommand : ICommand
       var cliMountsRw = parseResult.GetValue(_mountRwOption) ?? [];
       var noCleanup = parseResult.GetValue(_noCleanupOption);
       var noPull = parseResult.GetValue(_noPullOption);
+      var dind = parseResult.GetValue(_dindOption);
       var help2 = parseResult.GetValue(_help2Option);
       var updateScripts = parseResult.GetValue(_updateScriptsOption);
       var installShells = parseResult.GetValue(_installShellsOption);
@@ -365,11 +370,14 @@ public sealed class RunCommand : ICommand
         if (isGitHubCopilotTool)
         {
           // Add Copilot passthrough options
+          var promptAdded = false;
           if (!string.IsNullOrEmpty(prompt))
           {
             userArgs.Add("--prompt");
             userArgs.Add(prompt);
+            promptAdded = true;
           }
+
           if (continueSession)
           {
             userArgs.Add("--continue");
@@ -428,9 +436,23 @@ public sealed class RunCommand : ICommand
             userArgs.Add("--additional-mcp-config");
             userArgs.Add(mcpConfig);
           }
+
+          // Add passthrough args, treating the first non-flag as a prompt if none provided
+          foreach (var arg in passthroughArgs)
+          {
+            if (!promptAdded && !arg.StartsWith('-'))
+            {
+              userArgs.Add("--prompt");
+              userArgs.Add(arg);
+              promptAdded = true;
+            }
+            else
+            {
+              userArgs.Add(arg);
+            }
+          }
         }
 
-        userArgs.AddRange(passthroughArgs);
       }
 
       // Build command context for the tool
@@ -552,7 +574,7 @@ public sealed class RunCommand : ICommand
         Console.WriteLine($"🛡️  Airlock: enabled - {sourceDisplay}");
 
         // Run in Airlock mode with Docker Compose
-        return AirlockRunner.Run(ctx.RuntimeConfig, ctx, imageTag, _isYolo, allMounts, toolCommand);
+        return AirlockRunner.Run(ctx.RuntimeConfig, ctx, imageTag, _isYolo, allMounts, toolCommand, dind);
       }
 
       // Add directories for YOLO mode
@@ -572,7 +594,7 @@ public sealed class RunCommand : ICommand
       // Build Docker args for standard mode
       var sessionId = GenerateSessionId();
       var containerName = $"copilot_here-{sessionId}";
-      var dockerArgs = BuildDockerArgs(ctx, imageName, containerName, allMounts, toolCommand, _isYolo, imageTag, noPull);
+      var dockerArgs = BuildDockerArgs(ctx, imageName, containerName, allMounts, toolCommand, _isYolo, imageTag, noPull, dind);
 
       // Set terminal title
       var titleEmoji = _isYolo ? "🤖⚡️" : "🤖";
@@ -620,7 +642,8 @@ public sealed class RunCommand : ICommand
     List<string> toolCommand,
     bool isYolo,
     string imageTag,
-    bool noPull)
+    bool noPull,
+    bool dind)
   {
     // Generate session info JSON
     var sessionInfo = SessionInfo.Generate(ctx, imageTag, imageName, mounts, isYolo);
@@ -643,6 +666,36 @@ public sealed class RunCommand : ICommand
       "-e", $"PGID={ctx.Environment.GroupId}",
       "-e", $"COPILOT_HERE_SESSION_INFO={sessionInfo}"
     };
+
+    // Enable Docker-in-Docker if requested
+    if (dind)
+    {
+      if (OperatingSystem.IsWindows())
+      {
+        args.Add("-v");
+        args.Add("//var/run/docker.sock:/var/run/docker.sock");
+      }
+      else
+      {
+        args.Add("-v");
+        args.Add("/var/run/docker.sock:/var/run/docker.sock");
+      }
+
+      // Testcontainers compatibility: explicitly point to the Docker daemon via the socket
+      args.Add("-e");
+      args.Add("DOCKER_HOST=unix:///var/run/docker.sock");
+
+      // Testcontainers spawns containers via the HOST's Docker daemon, so their ports are
+      // mapped on the HOST's localhost — not the copilot_here container's localhost.
+      // This override tells Testcontainers to connect to spawned containers via the host address.
+      args.Add("-e");
+      args.Add("TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal");
+
+      // On Linux, host.docker.internal is not provided automatically (Docker Desktop on
+      // macOS/Windows adds it). This --add-host entry maps it to the Docker host gateway IP.
+      args.Add("--add-host");
+      args.Add("host.docker.internal:host-gateway");
+    }
 
     // Add auth environment variables from the active tool's auth provider
     foreach (var (key, value) in ctx.ActiveTool.GetAuthProvider().GetEnvironmentVars())

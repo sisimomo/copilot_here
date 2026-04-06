@@ -90,5 +90,21 @@ if [ -d /etc/copilot/lsp-config.d ] && [ ! -f /home/appuser/.copilot/lsp-config.
   chown "$USER_ID:$GROUP_ID" /home/appuser/.copilot/lsp-config.json
 fi
 
+# Fix Docker socket permissions if it exists
+if [ -S /var/run/docker.sock ]; then
+  DOCKER_GID=$(stat -c '%g' /var/run/docker.sock)
+  if [ "$DOCKER_GID" != "0" ]; then
+    DOCKER_GROUP=$(getent group "$DOCKER_GID" | cut -d: -f1 || true)
+    if [ -z "$DOCKER_GROUP" ]; then
+      DOCKER_GROUP="docker-host"
+      groupadd -g "$DOCKER_GID" "$DOCKER_GROUP" || true
+    fi
+    usermod -aG "$DOCKER_GROUP" appuser || true
+  fi
+  # Always ensure socket is readable/writable by everyone in the container
+  # (Safe because it's a disposable container and we want to avoid all permission issues)
+  chmod 666 /var/run/docker.sock 2>/dev/null || true
+fi
+
 # Switch to the user matching the host UID and execute the command passed to the script.
 exec gosu appuser "$@"

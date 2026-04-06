@@ -45,7 +45,8 @@ public static class AirlockRunner
     string imageTag,
     bool isYolo,
     List<MountEntry> mounts,
-    List<string> toolArgs)
+    List<string> toolArgs,
+    bool dind)
   {
     var rulesPath = ctx.AirlockConfig.RulesPath;
     if (string.IsNullOrEmpty(rulesPath) || !File.Exists(rulesPath))
@@ -105,7 +106,7 @@ public static class AirlockRunner
     // Generate compose file
     var composeFile = GenerateComposeFile(
       runtimeConfig, ctx, templateContent, projectName, appImage, proxyImage,
-      processedConfigPath, externalNetwork, appFlags, mounts, toolArgs, isYolo);
+      processedConfigPath, externalNetwork, appFlags, mounts, toolArgs, isYolo, dind);
 
     if (composeFile is null)
     {
@@ -284,7 +285,8 @@ public static class AirlockRunner
     List<string> appSandboxFlags,
     List<MountEntry> mounts,
     List<string> toolArgs,
-    bool isYolo)
+    bool isYolo,
+    bool dind)
   {
     try
     {
@@ -297,6 +299,41 @@ public static class AirlockRunner
         var resolvedPath = mount.ResolveHostPath(ctx.Paths.UserHome);
         var dockerPath = ConvertToDockerPath(resolvedPath);
         extraMounts.AppendLine($"      - {dockerPath}:{containerPath}:{mode}");
+      }
+
+      // Add Docker-in-Docker mount if requested
+      if (dind)
+      {
+        if (OperatingSystem.IsWindows())
+        {
+          extraMounts.AppendLine("      - //var/run/docker.sock:/var/run/docker.sock");
+        }
+        else
+        {
+          extraMounts.AppendLine("      - /var/run/docker.sock:/var/run/docker.sock");
+        }
+      }
+
+      // Build DinD environment variables for Testcontainers compatibility
+      var dindEnvVars = new StringBuilder();
+      if (dind)
+      {
+        // Explicitly point Testcontainers to the Docker daemon via the mounted socket
+        dindEnvVars.AppendLine("      - DOCKER_HOST=unix:///var/run/docker.sock");
+        // Testcontainers spawns containers via the HOST's Docker daemon, so their ports are
+        // mapped on the HOST's localhost — not the copilot_here container's localhost.
+        // This override tells Testcontainers to connect to spawned containers via the host address.
+        dindEnvVars.AppendLine("      - TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal");
+      }
+
+      // Build extra_hosts section for DinD (maps host.docker.internal on Linux)
+      var dindExtraHosts = new StringBuilder();
+      if (dind)
+      {
+        // On Linux, host.docker.internal is not provided automatically.
+        // Docker Desktop on macOS/Windows adds it, but host-gateway mapping ensures Linux parity.
+        dindExtraHosts.AppendLine("    extra_hosts:");
+        dindExtraHosts.Append("      - \"host.docker.internal:host-gateway\"");
       }
 
       // Build logs mount if logging enabled
@@ -412,6 +449,20 @@ public static class AirlockRunner
         {
           if (authEnvVars.Length > 0)
             lines[i] = authEnvVars.ToString().TrimEnd();
+          else
+            lines.RemoveAt(i);
+        }
+        else if (lines[i].Contains("{{DIND_ENV_VARS}}"))
+        {
+          if (dindEnvVars.Length > 0)
+            lines[i] = dindEnvVars.ToString().TrimEnd();
+          else
+            lines.RemoveAt(i);
+        }
+        else if (lines[i].Contains("{{DIND_EXTRA_HOSTS}}"))
+        {
+          if (dindExtraHosts.Length > 0)
+            lines[i] = dindExtraHosts.ToString().TrimEnd();
           else
             lines.RemoveAt(i);
         }

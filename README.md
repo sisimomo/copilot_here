@@ -56,6 +56,7 @@ All functions support switching between Docker image variants using flags:
 - **`-h` or `--help`** - Show usage help and examples
 - **`--no-cleanup`** - Skip cleanup of unused Docker images
 - **`--no-pull`** - Skip pulling the latest image
+- **`--dind`** - Enable Docker-in-Docker (DinD) by mounting the host's Docker socket
 - **`--mount <path>`** - Mount a directory as read-only (supports `path` or `host:container` format)
 - **`--mount-rw <path>`** - Mount a directory as read-write (supports `path` or `host:container` format)
 - **`--save-mount <path>`** - Save a mount to local config
